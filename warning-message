@@ -1,0 +1,24 @@
+from exec.ama_slack import AmaSlackConnector
+from google.cloud import bigquery
+
+client = bigquery.Client.from_service_account_json('/home/ec2-user/airflow/amanotes-analytics-7354a2a9496e.json')
+query = '''
+SELECT
+ *
+FROM `amanotes-analytics.infrastructure_cost.cost_at_last_warning`
+'''
+q_job = client.query(query)
+q_result = q_job.result()
+messages = []
+try:
+    for (count, row) in enumerate(q_result, start=1):
+        if row.to_be_warned_gg:
+            messages.append(f'Google spending reaches *${round(row.gg_cost_diff_from_last_warning,2)}* for the past {row.gg_duration} day(s).')
+        if row.to_be_warned_aws:
+            messages.append(f'AWS spending reaches *${round(row.aws_cost_diff_from_last_warning,2)}* for the past {row.aws_duration} day(s).')
+finally:
+    if messages:
+        for item in messages:
+            ama_slack = AmaSlackConnector(target='metric_alert_tech')
+            ama_slack._init_slack_client()
+            print(item)
