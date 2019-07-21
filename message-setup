@@ -1,0 +1,128 @@
+import json
+from typing import Callable
+from urllib import parse
+
+from slackclient import SlackClient
+
+
+class AmaSlackConnector:
+    '''Used to post, or generate airflow callback compatible callables
+    that post notification messages on Amanotes' Slack, #ds-notification channels.
+
+    Parameters
+    ----------
+    target : {'internal', 'external'}, default 'internal'
+        The target slack channel
+
+    Examples
+    -------
+    Use in Airflow as callback:
+    >>> from exec.ama_slack import AmaSlackConnector
+    >>> {..., 'on_failure_callback': AmaSlackConnector().generate_airflow_callback(), ...}
+
+    Use directly to post notification:
+    >>> ama_slack = AmaSlackConnector(target='external')
+    >>> ama_slack.post('This is a notification.')
+
+    '''
+
+    _channel_ids = {
+        'internal': 'CFJANKHFY',
+        'external': 'CETRM6KFV',
+        'ds-internal': 'G925P4RTL',
+        'metric_change_test': 'GHKPULQ0J',
+        'metric_alert_finance': 'GJ1REL1FZ',
+        'metric_alert_mp': 'GJ25Q8J1L',
+        'metric_alert_pama': 'GJ25QM1SS',
+        'metric_alert_pcty': 'GHZUXRUSH',
+        'metric_alert_pi_mkt': 'GJ01V6LEL',
+        'metric_alert_pi_pro': 'GJ0Q9NLHX',
+        'metric_alert_tech': 'GJUT9RCTW',
+        'ds-support-tech': 'CK1H91KT2',
+        'me': 'DHQRKR93K'
+    }
+
+    def __init__(self, target: str='internal', **kwargs):
+        self.target = target
+        self._set_channel_id()
+        self._init_slack_client()
+
+    def _set_channel_id(self):
+        self.channel_id = AmaSlackConnector._channel_ids.get(self.target, None)
+        if not self.channel_id:
+            raise ValueError('Invalid `target` for slack_callback.')
+
+    def _init_slack_client(self):
+        with open('/home/ec2-user/airflow/api_access.cfg', 'r') as f:
+            access = json.load(f)
+        self._slack_token = access['slack']['bot_user_oauth_access_token']
+        self._slack_client = SlackClient(self._slack_token)
+
+    def _slack_api_call(self, text: str='', attachments: list=[]):
+        self._slack_client.api_call(
+            "chat.postMessage",
+            channel=self.channel_id,
+            text=text,
+            attachments=attachments,
+            parse="full")
+
+    def _get_attachment_airflow(self, context):
+        task_execution_date = context['execution_date'].to_rfc3339_string()
+        task_execution_date_url = parse.quote(task_execution_date)
+        task_id = context['task'].task_id
+        dag_id = context['dag'].dag_id
+        task_log_url = f"http://ds.amanotesgames.com:8080/admin/airflow/log?" +\
+                       f"task_id={task_id}&dag_id={dag_id}" +\
+                       f"&execution_date={task_execution_date_url}"
+        dag_tree_url = f"http://ds.amanotesgames.com:8080/admin/airflow/" +\
+                       f"tree?dag_id={dag_id}"
+        clear_url = f"http://ds.amanotesgames.com:8080/admin/airflow/clear?" +\
+                    f"task_id={task_id}&dag_id={dag_id}" +\
+                    f"&future=false&past=false&upstream=false&downstream=true&recursive=true" +\
+                    f"&execution_date={task_execution_date_url}&origin={dag_tree_url}"
+        slack_attachment = [{
+                            "fallback": f"Task {context['task_instance_key_str']} failed.",
+                            "title": f"Task failed",
+                            "title_link": f"http://ds.amanotesgames.com:8080/admin/airflow/tree?dag_id={dag_id}",
+                            "text": f"Task <{task_id}> of DAG <{dag_id}> failed on <{task_execution_date}>.",
+                            "color": "#dd4b39",
+                            "actions": [
+                                        {"type": "button",
+                                         "text": "View task logs",
+                                         "url": task_log_url,
+                                         "style": "primary"},
+                                        {"type": "button",
+                                         "text": "View DAG tree",
+                                         "url": dag_tree_url,
+                                         "style": "primary"},
+                                        {"type": "button",
+                                         "text": "Clear task & downstreams",
+                                         "url": clear_url,
+                                         "style": "danger"}
+                                    ]
+                            }]
+        return slack_attachment
+
+    def generate_airflow_callback(self, airflow_callback_text: str=''):
+        '''Generate callable that can be used as Airflow callback.
+
+        Parameters
+        -----------
+        airflow_callback_text : str
+            Optional message to include in the notification.
+        '''
+        def _airflow_callback(context):
+            attachments = self._get_attachment_airflow(context)
+            self._slack_api_call(text=airflow_callback_text, attachments=attachments)
+            return
+        return _airflow_callback
+
+    def post(self, text: str=''):
+        '''Post message directly.
+
+        Parameters
+        -----------
+        text : str
+            The message to be posted.
+        '''
+        self._slack_api_call(text=text)
